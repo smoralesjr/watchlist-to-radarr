@@ -30,6 +30,9 @@
   .summary { display:flex; gap:1rem; margin:.5rem 0 1rem; flex-wrap:wrap; }
   .summary div { background:#121722; padding:.5rem .9rem; border-radius:6px; font-size:.85rem; }
   .summary b { display:block; font-size:1.2rem; }
+  .wl-row { display:flex; justify-content:space-between; align-items:center; background:#121722; padding:.5rem .75rem; border-radius:6px; margin:.35rem 0; font-size:.85rem; gap:.5rem; overflow-wrap:anywhere; }
+  .wl-row button { margin:0; padding:.3rem .7rem; font-size:.8rem; }
+  .sync-entry { font-size:.85rem; padding:.3rem 0; border-bottom:1px solid #2b3644; }
 </style>
 </head>
 <body>
@@ -64,6 +67,20 @@
       <button id="import-btn">Import to Radarr</button>
     </div>
     <div id="import-msg"></div>
+  </div>
+
+  <div class="card">
+    <label>Auto-sync — checks every 12 hours and imports new additions automatically</label>
+    <div class="row">
+      <input id="sync-url" placeholder="https://letterboxd.com/<username>/watchlist/">
+      <button id="sync-add-btn" class="secondary" style="flex:0 0 auto">Add</button>
+    </div>
+    <div id="sync-list"></div>
+    <div class="row">
+      <button id="sync-run-btn" class="secondary">Sync now</button>
+    </div>
+    <div id="sync-msg"></div>
+    <div id="sync-log"></div>
   </div>
 
   <div class="card" id="results-card" style="display:none">
@@ -155,9 +172,62 @@ async function run(endpoint) {
   } finally { btn.disabled = false; }
 }
 
+async function loadSync() {
+  const r = await fetch('/api/sync/watchlists');
+  const d = await r.json();
+  const list = document.getElementById('sync-list');
+  list.innerHTML = d.watchlists.length
+    ? d.watchlists.map(w => `<div class="wl-row">${w}</div>`).join('')
+    : '<div class="muted">No watchlists registered yet.</div>';
+  d.watchlists.forEach((w, i) => {
+    const row = list.children[i];
+    const btn = document.createElement('button');
+    btn.className = 'secondary'; btn.textContent = 'Remove';
+    btn.onclick = async () => {
+      await fetch('/api/sync/watchlists/remove', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url: w})});
+      loadSync();
+    };
+    row.appendChild(btn);
+  });
+  const logEl = document.getElementById('sync-log');
+  if (d.log && d.log.length) {
+    logEl.innerHTML = '<label>Recent syncs</label>' + d.log.map(l =>
+      `<div class="sync-entry">${new Date(l.time).toLocaleString()} — ${l.total_added} added` +
+      (l.lists.filter(x => x.error).map(x => `<div class="muted">${x.error}</div>`).join('')) + '</div>').join('');
+  } else if (d.last_sync) {
+    logEl.innerHTML = `<div class="muted">Last sync: ${new Date(d.last_sync).toLocaleString()}</div>`;
+  }
+}
+
+document.getElementById('sync-add-btn').onclick = async () => {
+  const url = document.getElementById('sync-url').value.trim();
+  if (!url) { msg(document.getElementById('sync-msg'), 'Paste a watchlist URL first.', false); return; }
+  const r = await fetch('/api/sync/watchlists', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})});
+  const d = await r.json();
+  if (!r.ok) { msg(document.getElementById('sync-msg'), d.error, false); return; }
+  document.getElementById('sync-url').value = '';
+  msg(document.getElementById('sync-msg'), 'Watchlist registered for auto-sync.', true);
+  loadSync();
+};
+
+document.getElementById('sync-run-btn').onclick = async () => {
+  const btn = document.getElementById('sync-run-btn');
+  btn.disabled = true;
+  msg(document.getElementById('sync-msg'), 'Syncing…', true);
+  try {
+    const r = await fetch('/api/sync/run', {method:'POST'});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Sync failed');
+    msg(document.getElementById('sync-msg'), `Sync done: ${d.total_added} added.`, true);
+  } catch (e) {
+    msg(document.getElementById('sync-msg'), e.message, false);
+  } finally { btn.disabled = false; loadSync(); }
+};
+
 document.getElementById('preview-btn').onclick = () => run('preview');
 document.getElementById('import-btn').onclick = () => run('import');
 loadConfig();
+loadSync();
 </script>
 </body>
 </html>

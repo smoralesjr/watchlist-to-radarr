@@ -1,7 +1,10 @@
 import json
 import os
 import re
+import threading
+import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -10,10 +13,141 @@ from flask import Flask, jsonify, render_template, request
 
 APP_DIR = Path(__file__).parent
 CONFIG_PATH = APP_DIR / "config.json"
+SYNC_PATH = APP_DIR / "sync.json"
+SYNC_INTERVAL_HOURS = 12
+SYNC_LOG_LIMIT = 100
 
 UA = {"User-Agent": "Mozilla/5.0 (watchlist-to-radarr)"}
 
 app = Flask(__name__)
+sync_lock = threading.Lock()
+sync_running = threading.Event()
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_sync():
+    if SYNC_PATH.exists():
+        try:
+            return json.loads(SYNC_PATH.read_text())
+        except (ValueError, OSError):
+            pass
+    return {"watchlists": [], "log": [], "last_sync": None}
+
+
+def save_sync(sync):
+    SYNC_PATH.write_text(json.dumps(sync, indent=2))
+
+
+def sync_all(background=False):
+    if sync_running.is_set():
+        return {"error": "A sync is already in progress."}
+    sync_running.set()
+    started = now_iso()
+    try:
+        cfg = load_config()
+        if not (cfg["radarr_url"] and cfg["radarr_api_key"]):
+            return {"error": "Connect Radarr first."}
+        with sync_lock:
+            sync = load_sync()
+        if not sync["watchlists"]:
+            return {"error": "No watchlists registered for auto-sync."}
+        per_list = []
+        total_added = 0
+        for wl in sync["watchlists"]:
+            entry = {"url": wl, "added": 0, "skipped": 0, "failed": 0,
+                     "error": None}
+            try:
+                username, items = fetch_watchlist(wl)
+                for item in items:
+                    title, year = parse_letterboxd_title(item["letterboxd_title"])
+                    try:
+                        result = add_movie(cfg, title, year)
+                    except RuntimeError as e:
+                        result = {"status": "error"}
+                    if result["status"] == "added":
+                        entry["added"] += 1
+                    elif result["status"] == "error":
+                        entry["failed"] += 1
+                    else:
+                        entry["skipped"] += 1
+                total_added += entry["added"]
+            except (ValueError, RuntimeError) as e:
+                entry["error"] = str(e)
+            per_list.append(entry)
+        with sync_lock:
+            sync = load_sync()
+            sync["last_sync"] = started
+            sync["log"] = ([{
+                "time": started,
+                "background": background,
+                "total_added": total_added,
+                "lists": per_list,
+            }] + sync["log"])[:SYNC_LOG_LIMIT]
+            save_sync(sync)
+        return {
+            "ok": True,
+            "time": started,
+            "total_added": total_added,
+            "lists": per_list,
+        }
+    finally:
+        sync_running.clear()
+
+
+def scheduler_loop():
+    while True:
+        time.sleep(SYNC_INTERVAL_HOURS * 3600)
+        try:
+            sync_all(background=True)
+        except Exception:
+            pass
+
+
+@app.route("/api/sync/watchlists", methods=["GET"])
+def get_watchlists():
+    with sync_lock:
+        sync = load_sync()
+    return jsonify(sync)
+
+
+@app.route("/api/sync/watchlists", methods=["POST"])
+def add_watchlist():
+    data = request.get_json(force=True)
+    try:
+        username = watchlist_username(data.get("url", ""))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    with sync_lock:
+        sync = load_sync()
+        if data["url"].strip() not in sync["watchlists"]:
+            sync["watchlists"].append(data["url"].strip())
+            save_sync(sync)
+    return jsonify(sync)
+
+
+@app.route("/api/sync/watchlists/remove", methods=["POST"])
+def remove_watchlist():
+    data = request.get_json(force=True)
+    with sync_lock:
+        sync = load_sync()
+        sync["watchlists"] = [w for w in sync["watchlists"] if w != data.get("url")]
+        save_sync(sync)
+    return jsonify(sync)
+
+
+@app.route("/api/sync/run", methods=["POST"])
+def run_sync():
+    result = sync_all(background=False)
+    code = 200 if result.get("ok") else 400
+    return jsonify(result), code
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
 
 
 def load_config():
@@ -190,11 +324,6 @@ def add_movie(cfg, query, year):
             "radarr_title": f"{best['title']} ({best.get('year', '?')})"}
 
 
-@app.route("/")
-def index():
-    return render_template("index.html")
-
-
 @app.route("/api/config", methods=["GET"])
 def get_config():
     cfg = load_config()
@@ -275,4 +404,5 @@ def import_watchlist():
 
 
 if __name__ == "__main__":
+    threading.Thread(target=scheduler_loop, daemon=True).start()
     app.run(host="127.0.0.1", port=5000)

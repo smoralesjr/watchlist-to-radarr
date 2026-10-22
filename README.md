@@ -6,6 +6,8 @@ Self-hosted web app: paste a public [Letterboxd](https://letterboxd.com) watchli
 
 ## Features
 
+- **Auto-sync**: register watchlists and the app re-checks them **every 12 hours**, importing anything new into Radarr automatically (with a "Sync now" button and a log of recent syncs)
+
 - Reads any **public** Letterboxd watchlist (RSS feed, with HTML scraping fallback for lists > 40 items)
 - Config UI for Radarr URL, API key, root folder, and quality profile (saved to `config.json`)
 - Preview the watchlist before importing
@@ -38,6 +40,16 @@ Optional environment overrides: `RADARR_URL`, `RADARR_API_KEY`, `RADARR_ROOT_FOL
 2. Paste a watchlist URL like `https://letterboxd.com/username/watchlist/`.
 3. Click **Preview** to see the parsed films, then **Import to Radarr**.
 4. Watch the results table; everything added appears in Radarr under **Wanted → Missing**.
+
+### Auto-sync (periodic monitoring)
+
+1. In the **Auto-sync** card, paste a watchlist URL and click **Add**. Repeat for as many watchlists as you want.
+2. That's it — the app re-checks every registered watchlist **every 12 hours** and imports new additions into Radarr (duplicates are skipped automatically).
+3. Use **Sync now** to trigger a check immediately, and see the log of recent syncs (added counts and per-list errors) below it.
+
+Registered watchlists and sync history are stored in `sync.json` next to `app.py`.
+
+> Note: auto-sync runs while the app is running. If you stop the Flask process, no checks happen until it starts again. The 12-hour timer counts from app startup; a manual "Sync now" does not reset it.
 
 The watchlist must be public — private lists can't be read without login.
 
