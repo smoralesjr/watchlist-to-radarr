@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Letterboxd → Radarr</title>
+<style>
+  :root { --bg:#14181d; --card:#1e2530; --accent:#00c2a8; --text:#e8edf2; --muted:#8a97a5; }
+  * { box-sizing:border-box; }
+  body { background:var(--bg); color:var(--text); font-family:system-ui,sans-serif; margin:0; min-height:100vh; }
+  .wrap { max-width:760px; margin:0 auto; padding:2rem 1rem; }
+  h1 { font-size:1.4rem; } h1 span { color:var(--accent); }
+  .card { background:var(--card); border-radius:10px; padding:1.25rem; margin-bottom:1rem; }
+  input, select { width:100%; padding:.6rem .75rem; border-radius:6px; border:1px solid #34404e; background:#121722; color:var(--text); margin:.3rem 0 .9rem; font-size:.95rem; }
+  label { font-size:.85rem; color:var(--muted); }
+  button { background:var(--accent); color:#06251f; border:none; padding:.65rem 1.2rem; border-radius:6px; font-weight:600; cursor:pointer; margin-top:.3rem; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.secondary { background:#2c3644; color:var(--text); }
+  .row { display:flex; gap:.5rem; } .row > * { flex:1; }
+  .msg { margin:.75rem 0; padding:.6rem .9rem; border-radius:6px; font-size:.9rem; }
+  .msg.ok { background:#0e2f28; color:#7de3c8; }
+  .msg.err { background:#3a1e22; color:#ff9aa4; }
+  .status-badge { font-size:.75rem; padding:.15rem .5rem; border-radius:99px; margin-left:.5rem; }
+  .b-added { background:#0e2f28; color:#7de3c8; } .b-already { background:#2a3542; color:#9fb2c4; }
+  .b-not_found, .b-error { background:#3a1e22; color:#ff9aa4; }
+  table { width:100%; border-collapse:collapse; font-size:.9rem; }
+  td, th { text-align:left; padding:.45rem .5rem; border-bottom:1px solid #2b3644; }
+  a { color:var(--accent); text-decoration:none; }
+  .muted { color:var(--muted); font-size:.85rem; }
+  .summary { display:flex; gap:1rem; margin:.5rem 0 1rem; flex-wrap:wrap; }
+  .summary div { background:#121722; padding:.5rem .9rem; border-radius:6px; font-size:.85rem; }
+  .summary b { display:block; font-size:1.2rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Letterboxd <span>→</span> Radarr</h1>
+  <p class="muted">Import any public Letterboxd watchlist into Radarr as monitored movies (they appear under <b>Wanted</b>).</p>
+
+  <div class="card">
+    <label>Radarr URL</label>
+    <input id="radarr-url" placeholder="http://radarr:7878">
+    <label>Radarr API key (Settings → General → API Key)</label>
+    <input id="radarr-key" type="password" placeholder="32-character key">
+    <div class="row">
+      <div>
+        <label>Root folder</label>
+        <select id="root-folder"></select>
+      </div>
+      <div>
+        <label>Quality profile</label>
+        <select id="quality-profile"></select>
+      </div>
+    </div>
+    <button id="save-btn">Save &amp; connect</button>
+    <div id="conn-msg"></div>
+  </div>
+
+  <div class="card">
+    <label>Letterboxd watchlist URL</label>
+    <input id="lb-url" placeholder="https://letterboxd.com/<username>/watchlist/">
+    <div class="row">
+      <button id="preview-btn" class="secondary" style="flex:0 0 auto">Preview</button>
+      <button id="import-btn">Import to Radarr</button>
+    </div>
+    <div id="import-msg"></div>
+  </div>
+
+  <div class="card" id="results-card" style="display:none">
+    <div class="summary" id="summary"></div>
+    <table id="results-table">
+      <thead><tr><th>Letterboxd</th><th>Radarr match</th><th>Status</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let connected = false;
+
+function msg(el, text, ok) {
+  el.innerHTML = text ? `<div class="msg ${ok ? 'ok' : 'err'}">${text}</div>` : '';
+}
+
+async function loadConfig() {
+  const r = await fetch('/api/config');
+  const c = await r.json();
+  document.getElementById('radarr-url').value = c.radarr_url || '';
+  connected = c.connected;
+  if (c.connected) msg(document.getElementById('conn-msg'), 'Connected to Radarr.', true);
+}
+
+document.getElementById('save-btn').onclick = async () => {
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true;
+  try {
+    const body = {
+      radarr_url: document.getElementById('radarr-url').value,
+      radarr_api_key: document.getElementById('radarr-key').value,
+      root_folder_path: document.getElementById('root-folder').value,
+      quality_profile_id: document.getElementById('quality-profile').value || null,
+    };
+    const r = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Connection failed');
+    const rf = document.getElementById('root-folder');
+    rf.innerHTML = d.root_folders.map(f => `<option ${f.path === d.root_folder_path || d.root_folders.length===1 ? 'selected' : ''}>${f.path}</option>`).join('');
+    const qp = document.getElementById('quality-profile');
+    qp.innerHTML = d.quality_profiles.map(p => `<option value="${p.id}" ${p.id === d.quality_profile_id || d.quality_profiles.length===1 ? 'selected' : ''}>${p.name}</option>`).join('');
+    fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({radarr_url: document.getElementById('radarr-url').value, radarr_api_key: document.getElementById('radarr-key').value,
+        root_folder_path: rf.value, quality_profile_id: qp.value})});
+    connected = true;
+    msg(document.getElementById('conn-msg'), 'Connected to Radarr.', true);
+  } catch (e) {
+    msg(document.getElementById('conn-msg'), e.message, false);
+  } finally { btn.disabled = false; }
+};
+
+function showResults(data) {
+  const card = document.getElementById('results-card');
+  card.style.display = 'block';
+  const tbody = document.querySelector('#results-table tbody');
+  const badge = s => ({added:'added', already_added:'already added', not_found:'not found', error:'error'}[s] || s);
+  tbody.innerHTML = data.map(r => {
+    const link = r.letterboxd_url ? `<a href="${r.letterboxd_url}" target="_blank">${r.letterboxd_title}</a>` : r.letterboxd_title;
+    return `<tr><td>${link}</td><td>${r.radarr_title || '—'}</td><td><span class="status-badge b-${r.status}">${badge(r.status)}${r.detail ? ': ' + r.detail : ''}</span></td></tr>`;
+  }).join('');
+  const counts = {};
+  data.forEach(r => counts[r.status] = (counts[r.status] || 0) + 1);
+  document.getElementById('summary').innerHTML =
+    Object.entries(counts).map(([k, v]) => `<div>${v}<b>${k.replace('_',' ')}</b></div>`).join('');
+}
+
+async function run(endpoint) {
+  if (!connected) { msg(document.getElementById('import-msg'), 'Connect Radarr first.', false); return; }
+  const url = document.getElementById('lb-url').value.trim();
+  if (!url) { msg(document.getElementById('import-msg'), 'Paste a watchlist URL first.', false); return; }
+  const btn = document.getElementById(endpoint === 'preview' ? 'preview-btn' : 'import-btn');
+  btn.disabled = true;
+  msg(document.getElementById('import-msg'), endpoint === 'import' ? 'Importing… this can take a minute for long lists.' : 'Loading…', true);
+  try {
+    const r = await fetch('/api/' + endpoint, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})});
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Request failed');
+    if (endpoint === 'preview') {
+      showResults(d.movies.map(m => ({...m, status:'not_found', radarr_title:''})));
+      msg(document.getElementById('import-msg'), `Found ${d.movies.length} films on @${d.username}'s watchlist.`, true);
+    } else {
+      showResults(d.results);
+      msg(document.getElementById('import-msg'), `Done: processed ${d.results.length} films.`, true);
+    }
+  } catch (e) {
+    msg(document.getElementById('import-msg'), e.message, false);
+  } finally { btn.disabled = false; }
+}
+
+document.getElementById('preview-btn').onclick = () => run('preview');
+document.getElementById('import-btn').onclick = () => run('import');
+loadConfig();
+</script>
+</body>
+</html>
